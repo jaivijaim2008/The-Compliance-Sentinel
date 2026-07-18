@@ -83,11 +83,11 @@ def call_groq_json(prompt: str) -> dict:
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "You must respond with valid JSON only. No markdown, no code fences, just raw JSON."},
+                {"role": "system", "content": "You must respond with valid JSON only. No markdown, no code fences, just raw JSON. Ensure all string values properly escape any internal quotes."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
-            max_tokens=1024,
+            max_tokens=2048,
         )
         result_text = response.choices[0].message.content.strip()
         # Strip markdown code fences if present
@@ -106,20 +106,20 @@ def call_groq_json(prompt: str) -> dict:
         return {}
 
 
-async def call_llm_json(prompt: str) -> dict:
+async def call_llm_json(prompt: str, agent_name: str = "unknown") -> dict:
     """Try Gemini first, fall back to Groq if Gemini fails."""
     result = await call_gemini_json(prompt)
     if result:
-        debug("LLM call succeeded via Gemini")
+        debug(f"[{agent_name}] LLM call succeeded via Gemini")
         return result
     
-    debug("Gemini failed or unavailable, falling back to Groq...")
+    debug(f"[{agent_name}] Gemini failed or unavailable, falling back to Groq...")
     result = call_groq_json(prompt)
     if result:
-        debug("LLM call succeeded via Groq")
+        debug(f"[{agent_name}] LLM call succeeded via Groq")
         return result
     
-    debug("Both Gemini and Groq failed")
+    debug(f"[{agent_name}] Both Gemini and Groq failed")
     return {}
 
 
@@ -149,29 +149,64 @@ async def analyze_document(file: UploadFile = File(...)):
 
     debug("Running Analysis Agents...")
 
-    # Agent 1: Legal
-    legal_prompt = f"You are a legal expert analyzing a contract. Find legal risks (termination clauses, liability limits). Return ONLY a JSON object with keys: 'risk' (High, Medium, or Low), 'description' (short text), and 'clause' (exact text of risky clause). Contract: {contract_snippet}"
-    legal_data = await call_llm_json(legal_prompt)
+    # Agent 1: Legal — uses a simpler 2-field response to avoid JSON parse failures
+    # caused by contract text with quotes/special chars in the 'clause' field.
+    # The clause is extracted separately via a second call if needed.
+    legal_prompt = f"You are a legal expert analyzing a contract. Find legal risks (termination clauses, liability limits). Return ONLY a JSON object with keys: 'risk' (High, Medium, or Low) and 'description' (short text describing the risk). Contract: {contract_snippet}"
+    legal_data = await call_llm_json(legal_prompt, "Legal")
     if not legal_data:
-        legal_data = {"risk": "Medium", "description": "Unable to analyze legal risks (LLM unavailable).", "clause": "N/A"}
+        legal_data = {"risk": "Medium", "description": "Unable to analyze legal risks (LLM unavailable)."}
+    # Ensure required fields exist
+    if "risk" not in legal_data:
+        legal_data["risk"] = "Medium"
+    if "description" not in legal_data:
+        legal_data["description"] = "No description provided."
 
     # Agent 2: Privacy
     privacy_prompt = f"You are a privacy expert analyzing a contract for GDPR and data risks. Return ONLY a JSON object with keys: 'risk' (High, Medium, or Low) and 'description' (short text). Contract: {contract_snippet}"
-    privacy_data = await call_llm_json(privacy_prompt)
+    privacy_data = await call_llm_json(privacy_prompt, "Privacy")
     if not privacy_data:
         privacy_data = {"risk": "Medium", "description": "Unable to analyze privacy risks (LLM unavailable)."}
+    if "risk" not in privacy_data:
+        privacy_data["risk"] = "Medium"
+    if "description" not in privacy_data:
+        privacy_data["description"] = "No description provided."
 
     # Agent 3: Finance
     finance_prompt = f"You are a finance expert analyzing a contract for financial risks (fees, payment terms). Return ONLY a JSON object with keys: 'risk' (High, Medium, or Low) and 'description' (short text). Contract: {contract_snippet}"
-    finance_data = await call_llm_json(finance_prompt)
+    finance_data = await call_llm_json(finance_prompt, "Finance")
     if not finance_data:
         finance_data = {"risk": "Medium", "description": "Unable to analyze financial risks (LLM unavailable)."}
+    if "risk" not in finance_data:
+        finance_data["risk"] = "Medium"
+    if "description" not in finance_data:
+        finance_data["description"] = "No description provided."
 
     # Agent 4: Security
     security_prompt = f"You are a cybersecurity expert analyzing a contract for security risks. Return ONLY a JSON object with keys: 'risk' (High, Medium, or Low) and 'description' (short text). Contract: {contract_snippet}"
-    security_data = await call_llm_json(security_prompt)
+    security_data = await call_llm_json(security_prompt, "Security")
     if not security_data:
         security_data = {"risk": "Medium", "description": "Unable to analyze security risks (LLM unavailable)."}
+    if "risk" not in security_data:
+        security_data["risk"] = "Medium"
+    if "description" not in security_data:
+        security_data["description"] = "No description provided."
+
+    # Extract the actual risky clause via a separate lightweight call
+    # This avoids JSON parse failures caused by contract text with quotes/special chars
+    if "clause" not in legal_data or legal_data.get("clause", "") in ("N/A", "", None):
+        try:
+            clause_prompt = f"Extract the single most risky clause from this contract text. Return ONLY a JSON object with key 'clause' (the exact contract text of the risky clause). Contract: {contract_snippet}"
+            clause_data = await call_llm_json(clause_prompt, "Clause")
+            if clause_data and "clause" in clause_data and clause_data["clause"]:
+                legal_data["clause"] = clause_data["clause"]
+            else:
+                legal_data["clause"] = legal_data.get("description", "No clause extracted.")
+        except Exception as e:
+            debug(f"[Clause] Extraction failed: {e}")
+            legal_data["clause"] = legal_data.get("description", "No clause extracted.")
+    else:
+        debug(f"[Clause] Legal agent already provided clause")
 
     debug("Running Debate Moderator...")
 
@@ -184,7 +219,7 @@ Security: {json.dumps(security_data)}
 
 Analyze these differing viewpoints and generate a short debate summary. Return ONLY a JSON object with exactly these 3 keys:
 'legal_view' (summary of legal concern), 'reviewer_view' (a counter-perspective or mitigating factor), and 'moderator_view' (your final ruling on the risk)."""
-    debate_data = await call_llm_json(debate_prompt)
+    debate_data = await call_llm_json(debate_prompt, "Debate")
     if not debate_data:
         debate_data = {
             "legal_view": "Legal sees potential risks.",
@@ -202,7 +237,7 @@ And described the risk as: {legal_data.get('description', 'Unknown')}
 
 Rewrite this clause to be more fair and balanced. Return ONLY a JSON object with these 3 keys:
 'original' (the original clause text), 'improved' (the rewritten fairer clause), and 'explanation' (why you changed it)."""
-    fix_data = await call_llm_json(fix_prompt)
+    fix_data = await call_llm_json(fix_prompt, "Fix")
     if not fix_data:
         fix_data = {
             "original": clause_to_fix,
