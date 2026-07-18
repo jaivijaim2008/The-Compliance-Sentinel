@@ -196,7 +196,7 @@ async def analyze_document(file: UploadFile = File(...)):
     # This avoids JSON parse failures caused by contract text with quotes/special chars
     if "clause" not in legal_data or legal_data.get("clause", "") in ("N/A", "", None):
         try:
-            clause_prompt = f"Extract the single most risky clause from this contract text. Return ONLY a JSON object with key 'clause' (the exact contract text of the risky clause). Contract: {contract_snippet}"
+            clause_prompt = f"The legal expert found this risk: {legal_data.get('description', 'N/A')}. Extract the exact contract clause text that corresponds to this risk. Return ONLY a JSON object with key 'clause' (the exact contract text of that risky clause). Contract: {contract_snippet}"
             clause_data = await call_llm_json(clause_prompt, "Clause")
             if clause_data and "clause" in clause_data and clause_data["clause"]:
                 legal_data["clause"] = clause_data["clause"]
